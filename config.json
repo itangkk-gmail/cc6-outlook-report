@@ -1,0 +1,31 @@
+{
+  "download_dir": "./downloads",
+  "master_file": "./output/CC6_master.xlsx",
+  "master_sheet": "Master",
+  "processed_file": "./processed.json",
+  "log_file": "./logs/run.log",
+  "status_file": "./logs/last_status.txt",
+  "status_json": "./logs/last_status.json",
+  "outlook": {
+    "folder": "Inbox",
+    "lookback_days": 30,
+    "subject_keywords": ["CC6", "report"],
+    "update_keyword": "update",
+    "attachment_extensions": [".xlsx", ".xls"]
+  },
+  "proxy": {
+    "http": "",
+    "https": ""
+  },
+  "graph": {
+    "client_id": "756985aa-4502-44b5-8820-6634859e76ea",
+    "tenant": "consumers",
+    "token_cache_file": "./logs/graph_token_cache.json"
+  },
+  "excel": {
+    "sheet_name": "DAILY REPORT",
+    "header_keyword": "ID /",
+    "data_start_col": 8,
+    "data_end_col": 23
+  }
+}
