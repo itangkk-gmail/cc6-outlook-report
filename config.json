@@ -4,6 +4,8 @@
   "master_sheet": "Master",
   "processed_file": "./processed.json",
   "log_file": "./logs/run.log",
+  "log_retention_days": 30,
+  "log_max_size_mb": 5,
   "status_file": "./logs/last_status.txt",
   "status_json": "./logs/last_status.json",
   "outlook": {

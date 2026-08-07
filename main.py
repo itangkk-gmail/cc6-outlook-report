@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,26 +18,35 @@ from outlook_client import fetch_report_attachments, is_update_subject
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "config.json"
 
-# Filled by setup_logging / write_status
-_SESSION_LOG: Path | None = None
 
 
-def setup_logging(log_file: str | Path | None) -> Path | None:
-    """Configure console + append log + per-run session log. Returns session log path."""
-    global _SESSION_LOG
+
+def setup_logging(
+    log_file: str | Path | None,
+    max_size_mb: int = 0,
+    retention_days: int = 0,
+) -> None:
+    """Configure console + append log, with optional log rotation and cleanup.
+    
+    Args:
+        log_file: Path to the cumulative run.log file.
+        max_size_mb: Rotate run.log if it exceeds this many MB (0 = disabled).
+        retention_days: Delete archived run.*.log files older than N days (0 = disabled).
+    """
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
-    session_path: Path | None = None
+    path: Path | None = None
 
     if log_file:
         path = Path(log_file)
         if not path.is_absolute():
             path = ROOT / path
         path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(path, encoding="utf-8"))
 
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_path = path.parent / f"run_{stamp}.log"
-        handlers.append(logging.FileHandler(session_path, encoding="utf-8"))
+        # Rotate before opening the log file for writing
+        if max_size_mb > 0 and path.exists():
+            _rotate_log(path, max_size_mb)
+
+        handlers.append(logging.FileHandler(path, encoding="utf-8"))
 
     logging.basicConfig(
         level=logging.INFO,
@@ -44,8 +54,57 @@ def setup_logging(log_file: str | Path | None) -> Path | None:
         handlers=handlers,
         force=True,
     )
-    _SESSION_LOG = session_path
-    return session_path
+
+    if path and retention_days > 0:
+        _cleanup_archives(path.parent, retention_days)
+
+
+def _rotate_log(log_path: Path, max_size_mb: int) -> None:
+    """Rename run.log to run.YYYYMMDD_HHMMSS.log if it exceeds max_size_mb."""
+    max_bytes = max_size_mb * 1024 * 1024
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return
+    if size <= max_bytes:
+        return
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archived = log_path.parent / f"run.{stamp}.log"
+    try:
+        log_path.rename(archived)
+        print(f"[LOG_ROTATE] run.log ({size / (1024 * 1024):.1f} MB) -> {archived.name}")
+    except OSError as exc:
+        print(f"[LOG_ROTATE] 轮转失败: {exc}")
+
+
+def _cleanup_archives(log_dir: Path, retention_days: int) -> None:
+    """Delete run.*.log archives older than retention_days."""
+    logger = logging.getLogger(__name__)
+    _ARCHIVE_PATTERN = re.compile(r"^run\.(\d{8})_\d{6}\.log$")
+    cutoff = datetime.now().date() - timedelta(days=retention_days)
+    deleted = 0
+    freed_bytes = 0
+
+    for f in log_dir.glob("run.*.log"):
+        m = _ARCHIVE_PATTERN.match(f.name)
+        if not m:
+            continue
+        try:
+            file_date = datetime.strptime(m.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            size = f.stat().st_size
+            try:
+                f.unlink()
+                freed_bytes += size
+                deleted += 1
+            except OSError as exc:
+                logger.warning("无法删除过期日志 %s: %s", f.name, exc)
+
+    if deleted:
+        logger.info("日志清理: 删除 %d 个过期归档, 释放 %.1f KB", deleted, freed_bytes / 1024)
 
 
 def resolve_cfg_path(cfg: dict[str, Any], key: str, default_rel: str) -> Path:
@@ -79,8 +138,6 @@ def write_status(
         f"finished_at={finished}",
         f"message={message}",
     ]
-    if _SESSION_LOG:
-        lines.append(f"session_log={_SESSION_LOG}")
     if cfg.get("log_file"):
         lines.append(f"append_log={cfg['log_file']}")
     if cfg.get("master_file"):
@@ -95,7 +152,6 @@ def write_status(
         "exit_code": exit_code,
         "finished_at": finished,
         "message": message,
-        "session_log": str(_SESSION_LOG) if _SESSION_LOG else None,
         "append_log": cfg.get("log_file"),
         "master_file": cfg.get("master_file"),
         "details": details,
@@ -372,11 +428,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cfg = load_config(config_path)
-    session_log = setup_logging(cfg.get("log_file"))
+    setup_logging(
+        cfg.get("log_file"),
+        max_size_mb=int(cfg.get("log_max_size_mb", 0)),
+        retention_days=int(cfg.get("log_retention_days", 0)),
+    )
     logger = logging.getLogger(__name__)
     logger.info("Config: %s", config_path)
-    if session_log:
-        logger.info("Session log: %s", session_log)
 
     try:
         if args.merge_only:

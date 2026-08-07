@@ -23,6 +23,7 @@ graph_token_cache_*.json
 # IDE
 .vscode/
 .idea/
+.codebuddy/
 *.swp
 *.swo
 
