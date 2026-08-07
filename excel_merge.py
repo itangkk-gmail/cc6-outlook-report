@@ -48,9 +48,17 @@ def read_daily_report(
     sheet_name: str = "DAILY REPORT",
     header_keyword: str = HEADER_ID_HINT,
     data_start_col: int = 8,
-    data_end_col: int = 23,
+    data_end_col: int = 24,
+    column_name_overrides: dict[int, str] | None = None,
 ) -> pd.DataFrame:
-    """Read the manpower/progress table (columns H-W) from a daily report."""
+    """Read the manpower/progress table (columns H-X) from a daily report.
+
+    ``column_name_overrides`` is a ``{col_number: name}`` dict used when the
+    source header is empty – useful for format migrations (e.g. new "Shift"
+    column that doesn't exist in older reports).
+    """
+    if column_name_overrides is None:
+        column_name_overrides = {24: "Shift"}
     path = Path(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
@@ -62,7 +70,9 @@ def read_daily_report(
             raise ValueError(f"Could not find header row containing {header_keyword!r} in {path.name}")
 
         headers = [
-            normalize_header(ws.cell(header_row, col).value) or f"Column_{col}"
+            normalize_header(ws.cell(header_row, col).value)
+            or column_name_overrides.get(col, "")
+            or f"Column_{col}"
             for col in range(data_start_col, data_end_col + 1)
         ]
 
@@ -109,7 +119,7 @@ def merge_into_master(
     sheet_name: str = "DAILY REPORT",
     header_keyword: str = HEADER_ID_HINT,
     data_start_col: int = 8,
-    data_end_col: int = 23,
+    data_end_col: int = 24,
 ) -> dict[str, Any]:
     """
     Merge one daily report into the master workbook.

@@ -533,12 +533,16 @@ def _download_attachments_from_message(
 # Public entry-point (same signature as before)
 # ---------------------------------------------------------------------------
 
-def fetch_report_attachments(config: dict[str, Any]) -> list[DownloadedAttachment]:
+def fetch_report_attachments(
+    config: dict[str, Any],
+    processed_message_ids: set[str] | None = None,
+) -> list[DownloadedAttachment]:
     outlook_cfg = config.get("outlook", {})
     download_dir = Path(config.get("download_dir", "./downloads"))
     if not download_dir.is_absolute():
         download_dir = (Path.cwd() / download_dir).resolve()
 
+    processed_message_ids = processed_message_ids or set()
     token = _acquire_token(config)
 
     messages = _list_messages(
@@ -550,6 +554,12 @@ def fetch_report_attachments(config: dict[str, Any]) -> list[DownloadedAttachmen
 
     downloaded: list[DownloadedAttachment] = []
     for msg in messages:
+        msg_id = _message_key(msg)
+        if msg_id in processed_message_ids:
+            subject = msg.get("subject", "(unknown)")[:60]
+            logger.info("Skip already processed: %s", subject)
+            continue
+
         try:
             downloaded.extend(
                 _download_attachments_from_message(

@@ -206,8 +206,17 @@ def run_outlook_pipeline(cfg: dict[str, Any]) -> int:
     processed_path = Path(cfg["processed_file"])
     processed = load_processed(processed_path)
 
+    # Extract message IDs that have already been fully processed (merged or errored)
+    processed_msg_ids: set[str] = set()
+    for dedupe_key, info in processed.get("messages", {}).items():
+        status = info.get("status", "")
+        if status in ("merged", "merge_error"):
+            msg_id = dedupe_key.split("|", 1)[0]
+            processed_msg_ids.add(msg_id)
+    logger.info("Loaded %d processed message IDs", len(processed_msg_ids))
+
     try:
-        attachments = fetch_report_attachments(cfg)
+        attachments = fetch_report_attachments(cfg, processed_message_ids=processed_msg_ids)
     except RuntimeError as exc:
         logger.error("%s", exc)
         write_status(cfg, ok=False, message=str(exc), exit_code=1)
