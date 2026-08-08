@@ -471,6 +471,106 @@ def _list_messages(
     return matched
 
 
+def _list_archive_messages(
+    token: str,
+    lookback_days: int,
+    subject_keywords: list[str],
+) -> list[dict]:
+    """Search matching messages in Archive folder and Online Archive mailbox.
+
+    Handles two archiving scenarios:
+    1. Archive folder in main mailbox   – well-known name ``archive``
+    2. Online Archive (In-Place Archive) – well-known name ``archivemsgfolderroot``
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=max(1, int(lookback_days))))
+    since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    params: dict[str, Any] = {
+        "$filter": f"receivedDateTime ge {since_str}",
+        "$orderby": "receivedDateTime desc",
+        "$top": 200,
+        "$select": "id,subject,receivedDateTime,hasAttachments,internetMessageId",
+    }
+
+    # Collect archive folder IDs to search
+    archive_folders: list[tuple[str, str]] = []  # [(folder_id, display_name), ...]
+
+    # 1) Archive folder in main mailbox
+    try:
+        archive_id = _resolve_folder_id(token, "Archive")
+        if archive_id:
+            archive_folders.append((archive_id, "Archive"))
+        else:
+            # well-known archive folder may not be listed under childFolders;
+            # try the well-known endpoint directly
+            data = _api_get(token, "/me/mailFolders/archive")
+            fid = data.get("id")
+            if fid:
+                archive_folders.append((fid, "Archive"))
+    except Exception:
+        logger.debug("Archive folder not found in main mailbox; skipping")
+
+    # 2) Online Archive (In-Place Archive) – recurse into archive mailbox
+    try:
+        root_data = _api_get(token, "/me/mailFolders/archivemsgfolderroot")
+        archive_root_id = root_data.get("id")
+        if archive_root_id:
+            # list child folders recursively
+            _collect_child_folders(token, archive_root_id, "ArchiveMailbox", archive_folders)
+    except Exception:
+        logger.debug("Online Archive mailbox not found; skipping")
+
+    if not archive_folders:
+        logger.info("No archive folders found (neither Archive nor Online Archive)")
+        return []
+
+    # Search each archive folder
+    all_matched: list[dict] = []
+    for fid, display_name in archive_folders:
+        try:
+            endpoint = f"/me/mailFolders/{fid}/messages"
+            folder_msgs: list[dict] = []
+            first_page = True
+            while endpoint:
+                p = params if first_page else None
+                data = _api_get(token, endpoint, p)
+                folder_msgs.extend(data.get("value", []))
+                next_link = data.get("@odata.nextLink")
+                endpoint = next_link[len(GRAPH_BASE):] if next_link and next_link.startswith(GRAPH_BASE) else (next_link or None)
+                first_page = False
+            matched = [m for m in folder_msgs
+                       if subject_matches(m.get("subject"), subject_keywords)]
+            all_matched.extend(matched)
+            logger.info("Archive folder '%s': matched %d / %d mails",
+                        display_name, len(matched), len(folder_msgs))
+        except Exception as exc:
+            logger.debug("Error searching archive folder '%s': %s", display_name, exc)
+
+    return all_matched
+
+
+def _collect_child_folders(
+    token: str,
+    parent_id: str,
+    prefix: str,
+    result: list[tuple[str, str]],
+    depth: int = 0,
+) -> None:
+    """Recursively collect child mail folder ids under *parent_id*."""
+    if depth > 5:  # safety limit
+        return
+    try:
+        data = _api_get(token, f"/me/mailFolders/{parent_id}/childFolders")
+        for f in data.get("value", []):
+            fid = f.get("id")
+            name = f.get("displayName", "unknown")
+            if fid:
+                result.append((fid, f"{prefix}/{name}"))
+                _collect_child_folders(token, fid, f"{prefix}/{name}", result, depth + 1)
+    except Exception:
+        logger.debug("Cannot list child folders under %s/%s", prefix, parent_id)
+
+
 def _download_attachments_from_message(
     token: str,
     message: dict,
@@ -545,11 +645,34 @@ def fetch_report_attachments(
     processed_message_ids = processed_message_ids or set()
     token = _acquire_token(config)
 
+    lookback_days = int(outlook_cfg.get("lookback_days", 30))
+    subject_keywords = list(outlook_cfg.get("subject_keywords", ["CC6", "report"]))
+
+    # Search main folder (Inbox / custom folder)
     messages = _list_messages(
         token,
         folder_name=outlook_cfg.get("folder", "Inbox"),
-        lookback_days=int(outlook_cfg.get("lookback_days", 30)),
-        subject_keywords=list(outlook_cfg.get("subject_keywords", ["CC6", "report"])),
+        lookback_days=lookback_days,
+        subject_keywords=subject_keywords,
+    )
+
+    # Search Archive + Online Archive, deduplicate by message key
+    archive_messages = _list_archive_messages(
+        token,
+        lookback_days=lookback_days,
+        subject_keywords=subject_keywords,
+    )
+    inbox_count = len(messages)
+    seen_keys: set[str] = {_message_key(m) for m in messages}
+    for am in archive_messages:
+        key = _message_key(am)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            messages.append(am)
+
+    logger.info(
+        "Total matched: %d (inbox=%d, archive=%d)",
+        len(messages), inbox_count, len(archive_messages),
     )
 
     downloaded: list[DownloadedAttachment] = []
