@@ -9,7 +9,7 @@
   "status_file": "./logs/last_status.txt",
   "status_json": "./logs/last_status.json",
   "outlook": {
-    "folder": "Inbox",
+    "folder": ["Inbox", "北海CM公邮"],
     "lookback_days": 30,
     "subject_keywords": ["CC6", "report"],
     "update_keyword": "update",

@@ -396,23 +396,55 @@ def _api_get_bytes(token: str, endpoint: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 def _resolve_folder_id(token: str, folder_name: str) -> str | None:
-    """Find a mail folder by name under Inbox or root. Returns folder id or None."""
+    """Find a mail folder by name (recursively). Returns folder id or None."""
     if not folder_name or folder_name.lower() == "inbox":
         return None  # caller uses /inbox directly
 
-    # Search under Inbox first
-    data = _api_get(token, "/me/mailFolders/inbox/childFolders")
-    for f in data.get("value", []):
-        if f.get("displayName", "").lower() == folder_name.lower():
-            return f["id"]
+    target = folder_name.lower()
 
-    # Search root mail folders
-    data = _api_get(token, "/me/mailFolders")
-    for f in data.get("value", []):
-        if f.get("displayName", "").lower() == folder_name.lower():
-            return f["id"]
+    def _search(parent_id: str, depth: int = 0) -> str | None:
+        if depth > 10:  # safety limit
+            return None
+        try:
+            data = _api_get(token, f"/me/mailFolders/{parent_id}/childFolders")
+            for f in data.get("value", []):
+                # Skip well-known system folders that should not be recursed
+                wkn = (f.get("wellKnownName") or "").lower()
+                if wkn in ("archive", "archivemsgfolderroot"):
+                    continue
+                if (f.get("displayName", "") or "").lower() == target:
+                    return f["id"]
+            # Not found at this level; recurse into children
+            for f in data.get("value", []):
+                wkn = (f.get("wellKnownName") or "").lower()
+                if wkn in ("archive", "archivemsgfolderroot"):
+                    continue
+                child_id = _search(f["id"], depth + 1)
+                if child_id:
+                    return child_id
+        except Exception:
+            logger.debug("Cannot list child folders under %s", parent_id)
+        return None
 
-    logger.warning("Folder '%s' not found; falling back to Inbox", folder_name)
+    # 1) Search under Inbox subtree
+    fid = _search("inbox")
+    if fid:
+        return fid
+
+    # 2) Search from root (top-level mail folders + all descendants)
+    root_data = _api_get(token, "/me/mailFolders")
+    for f in root_data.get("value", []):
+        if (f.get("displayName", "") or "").lower() == target:
+            return f["id"]
+    for f in root_data.get("value", []):
+        wkn = (f.get("wellKnownName") or "").lower()
+        if wkn in ("archive", "archivemsgfolderroot"):
+            continue
+        fid = _search(f["id"], 1)
+        if fid:
+            return fid
+
+    logger.warning("Folder '%s' not found after recursive search; falling back to Inbox", folder_name)
     return None
 
 
@@ -648,13 +680,30 @@ def fetch_report_attachments(
     lookback_days = int(outlook_cfg.get("lookback_days", 30))
     subject_keywords = list(outlook_cfg.get("subject_keywords", ["CC6", "report"]))
 
-    # Search main folder (Inbox / custom folder)
-    messages = _list_messages(
-        token,
-        folder_name=outlook_cfg.get("folder", "Inbox"),
-        lookback_days=lookback_days,
-        subject_keywords=subject_keywords,
-    )
+    # Normalize folder config: support string or list
+    folder_cfg = outlook_cfg.get("folder", "Inbox")
+    if isinstance(folder_cfg, str):
+        folders = [folder_cfg]
+    elif isinstance(folder_cfg, list):
+        folders = folder_cfg
+    else:
+        folders = ["Inbox"]
+
+    # Search all configured folders
+    messages: list[dict] = []
+    seen_keys: set[str] = set()
+    for folder_name in folders:
+        folder_msgs = _list_messages(
+            token,
+            folder_name=folder_name,
+            lookback_days=lookback_days,
+            subject_keywords=subject_keywords,
+        )
+        for m in folder_msgs:
+            key = _message_key(m)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                messages.append(m)
 
     # Search Archive + Online Archive, deduplicate by message key
     archive_messages = _list_archive_messages(
@@ -662,8 +711,6 @@ def fetch_report_attachments(
         lookback_days=lookback_days,
         subject_keywords=subject_keywords,
     )
-    inbox_count = len(messages)
-    seen_keys: set[str] = {_message_key(m) for m in messages}
     for am in archive_messages:
         key = _message_key(am)
         if key not in seen_keys:
@@ -671,8 +718,8 @@ def fetch_report_attachments(
             messages.append(am)
 
     logger.info(
-        "Total matched: %d (inbox=%d, archive=%d)",
-        len(messages), inbox_count, len(archive_messages),
+        "Total matched: %d (folders=%s, archive=%d)",
+        len(messages), folders, len(archive_messages),
     )
 
     downloaded: list[DownloadedAttachment] = []
